@@ -43,19 +43,19 @@ variable "desired_count" {
 variable "mqtt_topic" {
   description = "MQTT topic for OBD-II telemetry"
   type        = string
-  default     = "obdii/telemetry"
+  default     = "obdii-telemetry"
 }
 
-variable "msk_broker_type" {
-  description = "MSK broker instance type"
-  type        = string
-  default     = "kafka.t3.small"
-}
-
-variable "msk_number_of_broker_nodes" {
-  description = "Number of MSK broker nodes"
+variable "kinesis_shard_count" {
+  description = "Number of shards for the telemetry Kinesis stream"
   type        = number
-  default     = 2
+  default     = 1
+}
+
+variable "kinesis_retention_hours" {
+  description = "Kinesis stream data retention period in hours (24-168)"
+  type        = number
+  default     = 24
 }
 
 variable "mq_broker_instance_type" {

@@ -15,7 +15,7 @@ EXPOSE 8080
 
 # Define environment variables (example)
 ENV S3_BUCKET=obd-ii-logs
-ENV MQTT_TOPIC=obdii/telemetry
+ENV MQTT_TOPIC=obdii-telemetry
 
 # Run the application when the container launches
 CMD ["python", "replay_engine.py"]

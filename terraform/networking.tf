@@ -136,7 +136,7 @@ resource "aws_vpc_endpoint" "s3" {
 }
 
 # Security Groups
-# Security Group for ECS tasks (allow outbound to internet for pulling images and to IoT Core, MSK, etc.)
+# Security Group for ECS tasks (allow outbound to internet for pulling images and to IoT Core, Kinesis, etc.)
 resource "aws_security_group" "ecs_tasks" {
   name        = "${var.environment}-ecs-tasks-sg"
   description = "Allow ECS tasks to communicate outbound"
@@ -152,42 +152,6 @@ resource "aws_security_group" "ecs_tasks" {
 
   tags = {
     Name        = "${var.environment}-ecs-tasks-sg"
-    Environment = var.environment
-  }
-}
-
-# Security Group for MSK (allow inbound from VPC on Kafka port)
-resource "aws_security_group" "msk" {
-  name        = "${var.environment}-msk-sg"
-  description = "Allow inbound traffic to MSK brokers"
-  vpc_id      = aws_vpc.main.id
-
-  ingress {
-    description = "Kafka client traffic"
-    from_port   = 9092
-    to_port     = 9092
-    protocol    = "tcp"
-    cidr_blocks = [var.vpc_cidr] # Allow from within the VPC
-  }
-
-  # Allow inbound from same SG for inter-broker communication
-  ingress {
-    description = "Inter-broker communication"
-    from_port   = 9092
-    to_port     = 9092
-    protocol    = "tcp"
-    self        = true
-  }
-
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-
-  tags = {
-    Name        = "${var.environment}-msk-sg"
     Environment = var.environment
   }
 }

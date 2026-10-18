@@ -99,9 +99,9 @@ resource "aws_iam_role_policy_attachment" "ecs_task_iot_publish" {
   policy_arn = aws_iam_policy.ecs_task_iot_publish.arn
 }
 
-# IAM Role for IoT Core topic rule to publish to MSK (Kafka)
-resource "aws_iam_role" "iot_topic_rule_msk" {
-  name = "${var.environment}-iot-topic-rule-msk-role"
+# IAM Role for IoT Core topic rule to write to Kinesis
+resource "aws_iam_role" "iot_topic_rule_kinesis" {
+  name = "${var.environment}-iot-topic-rule-kinesis-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -117,14 +117,10 @@ resource "aws_iam_role" "iot_topic_rule_msk" {
   })
 }
 
-# Policy for IoT Core to write to MSK (we'll use the MSK cluster ARN)
-# Note: The actual permission for MSK is to allow the IoT Core role to send data to the cluster via the Kafka API.
-# We'll use the managed policy for MSK? Actually, there isn't one. We'll allow the Kafka cluster resource.
-# However, note: the IoT Core rule uses the Kafka action, which requires the cluster to be specified in the rule.
-# We'll allow the role to perform kafka-cluster:Connect and kafka-cluster:WriteData on the MSK cluster resource.
-resource "aws_iam_policy" "iot_topic_rule_msk" {
-  name        = "${var.environment}-iot-topic-rule-msk-policy"
-  description = "Allow IoT Core to write to MSK cluster"
+# Policy for IoT Core to put records on the telemetry Kinesis stream
+resource "aws_iam_policy" "iot_topic_rule_kinesis" {
+  name        = "${var.environment}-iot-topic-rule-kinesis-policy"
+  description = "Allow IoT Core to write telemetry records to the Kinesis stream"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -132,20 +128,19 @@ resource "aws_iam_policy" "iot_topic_rule_msk" {
       {
         Effect   = "Allow"
         Action   = [
-          "kafka-cluster:Connect",
-          "kafka-cluster:WriteData",
-          "kafka-cluster:CreateTopic"
+          "kinesis:PutRecord",
+          "kinesis:PutRecords"
         ]
-        Resource = "*" # We'll restrict to the MSK cluster ARN once we have it, but for now we use *
+        Resource = aws_kinesis_stream.telemetry.arn
       }
     ]
   })
 }
 
 # Attach the policy to the IoT Core role
-resource "aws_iam_role_policy_attachment" "iot_topic_rule_msk" {
-  role       = aws_iam_role.iot_topic_rule_msk.name
-  policy_arn = aws_iam_policy.iot_topic_rule_msk.arn
+resource "aws_iam_role_policy_attachment" "iot_topic_rule_kinesis" {
+  role       = aws_iam_role.iot_topic_rule_kinesis.name
+  policy_arn = aws_iam_policy.iot_topic_rule_kinesis.arn
 }
 
 # Data sources for current region and account ID

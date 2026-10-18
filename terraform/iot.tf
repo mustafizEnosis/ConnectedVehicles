@@ -1,28 +1,23 @@
-# AWS IoT Topic Rule to forward telemetry to MSK
-resource "aws_iot_topic_rule" "msk_forward" {
-  name        = "${var.environment}_obd_ii_msk_forward"
-  description = "Forward OBD-II telemetry from MQTT to MSK"
+# AWS IoT Topic Rule to forward telemetry to Kinesis
+resource "aws_iot_topic_rule" "kinesis_forward" {
+  name        = "${var.environment}_obd_ii_kinesis_forward"
+  description = "Forward OBD-II telemetry from MQTT to Kinesis"
 
-  # Simple syntax attributes (required)
   sql         = "SELECT * FROM '${var.mqtt_topic}'"
   enabled     = true
   sql_version = "2016-03-23"
 
-  # Kafka action block (for sending data to MSK)
-  kafka {
-    destination_arn = aws_msk_cluster.main.arn
-    topic           = var.mqtt_topic
-    key             = ""
-    partition       = ""
+  # Kinesis action (writes each matching message as a record to the stream)
+  kinesis {
+    role_arn    = aws_iam_role.iot_topic_rule_kinesis.arn
+    stream_name = aws_kinesis_stream.telemetry.name
 
-    # Required by Terraform's kafka block for producer client config
-    client_properties = {
-      "bootstrap.servers" = aws_msk_cluster.main.bootstrap_brokers_sasl_iam
-    }
+    # Partition by vehicle so each vehicle's telemetry keeps its ordering across shards
+    partition_key = "$${vehicle_id}"
   }
 
   tags = {
-    Name        = "${var.environment}-obd-ii-msk-forward-rule"
+    Name        = "${var.environment}-obd-ii-kinesis-forward-rule"
     Environment = var.environment
   }
 }

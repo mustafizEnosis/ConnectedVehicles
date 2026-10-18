@@ -76,7 +76,10 @@ resource "aws_ecs_service" "replay_engine" {
   cluster         = aws_ecs_cluster.main.id
   task_definition = aws_ecs_task_definition.replay_engine.arn
   launch_type     = "FARGATE"
-  desired_count   = var.desired_count
+  desired_count   = 0
+  lifecycle {
+    ignore_changes = [desired_count]
+  }
 
   network_configuration {
     subnets         = aws_subnet.private[*].id

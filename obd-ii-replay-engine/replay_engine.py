@@ -141,7 +141,7 @@ def main():
 
     # Get configuration from environment variables
     s3_bucket = os.environ.get('S3_BUCKET', 'obd-ii-logs')
-    mqtt_topic = os.environ.get('MQTT_TOPIC', 'obdii/telemetry')
+    mqtt_topic = os.environ.get('MQTT_TOPIC', 'obdii-telemetry')
     iot_endpoint = os.environ.get('IOT_ENDPOINT', 'http://host.docker.internal:4566')
     # iot_cert_path = os.environ.get('IOT_CERT_PATH')
     # iot_key_path = os.environ.get('IOT_KEY_PATH')
