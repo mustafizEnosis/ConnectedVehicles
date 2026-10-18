@@ -6,6 +6,7 @@ services:
     container_name: floci
     ports:
       - "4566:4566"
+      - "1883:1883"
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/app/data
@@ -13,6 +14,7 @@ services:
       - FLOCI_STORAGE_MODE=hybrid
       - FLOCI_STORAGE_PERSISTENT_PATH=/app/data
       - FLOCI_CORS_ALLOWED_ORIGINS=*
+      - FLOCI_SERVICES_IOT_MQTT_AUTO_START=true
       - QUARKUS_HTTP_HOST=0.0.0.0
     healthcheck:
       test: ["CMD", "curl", "-f", "http://localhost:4566/health"]
