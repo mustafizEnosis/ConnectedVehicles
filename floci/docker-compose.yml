@@ -19,6 +19,12 @@ services:
       interval: 5s
       timeout: 3s
       retries: 5
+    networks:
+      - telemetry-net
+
+networks:
+  telemetry-net:
+    driver: bridge
 
   # Use http://localhost:4566/_floci/ui
   # floci-ui:

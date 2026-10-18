@@ -1,0 +1,168 @@
+name: Build and Deploy OBD-II Replay Engine Docker Image to Local Floci (via ECR)
+
+env:
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_PAGER: ""
+  AWS_ENDPOINT_URL: http://host.docker.internal:4566
+  ECR_REGISTRY: host.docker.internal:5100
+  ECR_TASK_REGISTRY: host.docker.internal:5100
+  ECR_REPOSITORY: dev-obd-ii-replay-engine
+  ECS_CLUSTER: obd-ii-replay-cluster
+  ECS_SERVICE: dev-obd-ii-replay-engine-service
+  ECS_TASK_FAMILY: dev-obd-ii-replay-engine
+  ECS_CONTAINER_NAME: obd-ii-replay-engine
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment (e.g., dev, prod) - used for image tagging'
+        required: true
+        default: 'dev'
+      image_tag:
+        description: 'Docker image tag (optional, defaults to git sha)'
+        required: false
+        default: ''
+
+jobs:
+  build_and_push:
+    name: Build and Push Docker Image
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Ensure AWS CLI is Installed
+        run: |
+          if ! command -v aws &> /dev/null; then
+            echo "AWS CLI not found. Installing..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if [ "$(id -u)" -eq 0 ]; then
+              ./aws/install
+            else
+              sudo ./aws/install
+            fi
+            rm -rf aws awscliv2.zip
+          fi
+          aws --version
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found. Installing..."
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update
+              apt-get install -y jq
+            else
+              sudo apt-get update
+              sudo apt-get install -y jq
+            fi
+          fi
+          jq --version
+
+      - name: Configure Floci ECR credentials
+        run: |
+          set -euo pipefail
+          ECR_PASSWORD="$(aws ecr get-login-password \
+            --region "$AWS_DEFAULT_REGION" \
+            --endpoint-url "$AWS_ENDPOINT_URL")"
+          if [ -z "$ECR_PASSWORD" ]; then
+            echo "Floci returned an empty ECR password" >&2
+            exit 1
+          fi
+
+          DOCKER_CONFIG="$RUNNER_TEMP/floci-docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          AUTH="$(printf 'AWS:%s' "$ECR_PASSWORD" | base64 -w 0)"
+          printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$ECR_REGISTRY" "$AUTH" > "$DOCKER_CONFIG/config.json"
+          echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> "$GITHUB_ENV"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          config-inline: |
+            [registry."host.docker.internal:5100"]
+              http = true
+
+      - name: Set image tags
+        id: tags
+        env:
+          IMAGE_TAG_INPUT: ${{ github.event.inputs.image_tag }}
+          DEPLOY_ENVIRONMENT: ${{ github.event.inputs.environment }}
+        run: |
+          # Determine the image tag
+          TAG="$IMAGE_TAG_INPUT"
+          if [ -z "$TAG" ]; then
+            TAG="$GITHUB_SHA"
+          fi
+          # Use the environment and tag to form the full tag
+          FULL_TAG="${DEPLOY_ENVIRONMENT}-${TAG}"
+          if [[ ! "$FULL_TAG" =~ ^[A-Za-z0-9_][A-Za-z0-9_.-]{0,127}$ ]]; then
+            echo "Invalid Docker image tag: $FULL_TAG" >&2
+            exit 1
+          fi
+          IMAGE_NAME="$ECR_REGISTRY/$ECR_REPOSITORY:$FULL_TAG"
+          TASK_IMAGE_NAME="$ECR_TASK_REGISTRY/$ECR_REPOSITORY:$FULL_TAG"
+          echo "full_tag=$FULL_TAG" >> $GITHUB_OUTPUT
+          echo "image_name=$IMAGE_NAME" >> $GITHUB_OUTPUT
+          echo "task_image_name=$TASK_IMAGE_NAME" >> $GITHUB_OUTPUT
+
+      - name: Build and push Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./obd-ii-replay-engine
+          push: true
+          tags: ${{ steps.tags.outputs.image_name }}
+
+      - name: Register ECS task definition and update service
+        env:
+          TASK_IMAGE_NAME: ${{ steps.tags.outputs.task_image_name }}
+        run: |
+          set -euo pipefail
+          TASK_DEFINITION_FILE="$RUNNER_TEMP/task-definition.json"
+          UPDATED_TASK_DEFINITION_FILE="$RUNNER_TEMP/updated-task-definition.json"
+
+          aws ecs describe-task-definition \
+            --task-definition "$ECS_TASK_FAMILY" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --query taskDefinition \
+            --output json > "$TASK_DEFINITION_FILE"
+
+          jq --arg container "$ECS_CONTAINER_NAME" --arg image "$TASK_IMAGE_NAME" '
+            del(.taskDefinitionArn, .revision, .status, .requiresAttributes, .compatibilities, .registeredAt, .registeredBy, .deregisteredAt)
+            | if any(.containerDefinitions[]; .name == $container) then
+                .containerDefinitions |= map(if .name == $container then .image = $image else . end)
+              else
+                error("Container definition not found: " + $container)
+              end
+          ' "$TASK_DEFINITION_FILE" > "$UPDATED_TASK_DEFINITION_FILE"
+
+          TASK_DEFINITION_ARN="$(aws ecs register-task-definition \
+            --cli-input-json "file://$UPDATED_TASK_DEFINITION_FILE" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --query taskDefinition.taskDefinitionArn \
+            --output text)"
+
+          if [ -z "$TASK_DEFINITION_ARN" ] || [ "$TASK_DEFINITION_ARN" = "None" ]; then
+            echo "ECS did not return a task definition ARN" >&2
+            exit 1
+          fi
+
+          aws ecs update-service \
+            --cluster "$ECS_CLUSTER" \
+            --service "$ECS_SERVICE" \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --endpoint-url "$AWS_ENDPOINT_URL"
+
+          echo "Updated $ECS_SERVICE to use $TASK_IMAGE_NAME ($TASK_DEFINITION_ARN)"
+
+      - name: Output image URL
+        run: |
+          echo "Docker image pushed to: ${{ steps.tags.outputs.image_name }}"
+          echo "To use locally, pull the image and update your floci/docker-compose.yml:"
+          echo "  docker pull ${{ steps.tags.outputs.image_name }}"
+          echo "  # Then update the image in floci/docker-compose.yml for the replay engine service"
+          echo "  # and run: docker-compose up -d"
