@@ -54,7 +54,7 @@ jobs:
 
       - name: Terraform Plan
         working-directory: ./terraform
-        run: terraform plan -var="environment=${{ github.event.inputs.environment }}" -var-file="terraform.tfvars" -input=false
+        run: terraform plan -var="environment=${{ github.event.inputs.environment }}" -var-file="/tmp/terraform.tfvars" -input=false
 
   apply:
     name: Terraform Apply
@@ -90,4 +90,4 @@ jobs:
 
       - name: Terraform Apply
         working-directory: ./terraform
-        run: terraform apply -var="environment=${{ github.event.inputs.environment }}" -var-file="terraform.tfvars" -auto-approve -input=false
+        run: terraform apply -var="environment=${{ github.event.inputs.environment }}" -var-file="/tmp/terraform.tfvars" -auto-approve -input=false
