@@ -24,7 +24,7 @@ resource "aws_internet_gateway" "main" {
 resource "aws_eip" "nat" {
   count = length(var.public_subnet_cidrs)
 
-  vpc = true
+  domain = "vpc"
 
   tags = {
     Name        = "${var.environment}-nat-eip-${count.index}"
@@ -127,7 +127,7 @@ resource "aws_route_table_association" "private" {
 resource "aws_vpc_endpoint" "s3" {
   vpc_id       = aws_vpc.main.id
   service_name = "com.amazonaws.${var.aws_region}.s3"
-  route_table_ids = [aws_route_table.private[*].id] # Associate with all private route tables
+  route_table_ids = tolist(aws_route_table.private[*].id) # Associate with all private route tables
 
   tags = {
     Name        = "${var.environment}-s3-endpoint"
@@ -176,7 +176,7 @@ resource "aws_security_group" "msk" {
     from_port   = 9092
     to_port     = 9092
     protocol    = "tcp"
-    security_groups = [aws_security_group.msk.id]
+    self        = true
   }
 
   egress {
@@ -221,7 +221,7 @@ resource "aws_security_group" "mq" {
     from_port   = 0
     to_port     = 0
     protocol    = "-1"
-    security_groups = [aws_security_group.mq.id]
+    self        = true
   }
 
   egress {
@@ -236,6 +236,3 @@ resource "aws_security_group" "mq" {
     Environment = var.environment
   }
 }
-
-# Security Group for IoT Core (not directly applicable, but we might need to allow the VPC to IoT Core? Actually, IoT Core is a public service, so we don't need a SG for it.
-# However, we might want to allow outbound from ECS tasks to IoT Core on port 443 or 8883 (MQTT over TLS). We'll handle that in the egress of the ECS tasks SG (already open).

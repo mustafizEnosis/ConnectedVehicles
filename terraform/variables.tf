@@ -67,7 +67,7 @@ variable "mq_broker_instance_type" {
 variable "mq_broker_engine_type" {
   description = "Amazon MQ broker engine type"
   type        = string
-  default     = "ACTIVEMQ"
+  default     = "RABBITMQ"
 }
 
 variable "mq_broker_engine_version" {

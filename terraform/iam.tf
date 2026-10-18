@@ -79,9 +79,9 @@ resource "aws_iam_policy" "ecs_task_iot_publish" {
         ]
         Resource = [
           # Allow connecting to IoT Core
-          "arn:aws:iot:${data.aws_region.current.name}:${data.aws_account_id.current.id}:client/*",
+          "arn:aws:iot:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:client/*",
           # Allow publishing to our specific topic (we can use a wildcard for the topic if needed)
-          "arn:aws:iot:${data.aws_region.current.name}:${data.aws_account_id.current.id}:topic/${var.mqtt_topic}"
+          "arn:aws:iot:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:topic/${var.mqtt_topic}"
         ]
       }
     ]
@@ -150,4 +150,4 @@ resource "aws_iam_role_policy_attachment" "iot_topic_rule_msk" {
 
 # Data sources for current region and account ID
 data "aws_region" "current" {}
-data "aws_account_id" "current" {}
+data "aws_caller_identity" "current" {}
