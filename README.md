@@ -17,4 +17,18 @@ export AWS_ACCESS_KEY_ID=test
 export AWS_SECRET_ACCESS_KEY=test
 export AWS_DEFAULT_REGION=us-east-1
 
+ITERATOR=$(aws kinesis get-shard-iterator \
+  --stream-name dev-obd-ii-telemetry \
+  --shard-id shardId-000000000000 \
+  --shard-iterator-type TRIM_HORIZON \
+  --region us-east-1 \
+  --endpoint-url http://localhost:4566 \
+  --query "ShardIterator" \
+  --output text)
+
+
+aws kinesis get-records \
+  --shard-iterator "$ITERATOR" \
+  --region us-east-1 \
+  --endpoint-url http://localhost:4566
 

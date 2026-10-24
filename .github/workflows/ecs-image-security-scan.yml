@@ -1,0 +1,300 @@
+name: ECS Image Security Scan with Trivy and Auto-PR
+
+env:
+  AWS_ACCESS_KEY_ID: test
+  AWS_SECRET_ACCESS_KEY: test
+  AWS_DEFAULT_REGION: us-east-1
+  AWS_ENDPOINT_URL: http://host.docker.internal:4566
+  ECR_REGISTRY: host.docker.internal:5100
+  ECS_CLUSTER: obd-ii-replay-cluster
+  ECS_SERVICE: dev-obd-ii-replay-engine-service
+  MIN_SEVERITY: ${{ github.event.inputs.severity || 'HIGH' }}
+
+on:
+  # schedule:
+  #   - cron: '0 3 * * *'
+  workflow_dispatch:
+    inputs:
+      severity:
+        description: 'Minimum severity to trigger auto-fix (CRITICAL,HIGH)'
+        required: false
+        default: 'HIGH'
+  push:
+    paths:
+      - 'obd-ii-replay-engine/**'
+      - '.github/workflows/ecs-image-security-scan.yml'
+
+permissions:
+  contents: write
+  pull-requests: write
+  id-token: write
+
+jobs:
+  discover-and-scan:
+    name: Discover ECS images and scan with Trivy
+    runs-on: ubuntu-latest
+    outputs:
+      vulnerabilities_found: ${{ steps.check.outputs.vulnerabilities_found }}
+      image_uri: ${{ steps.discover.outputs.image_uri }}
+      report_path: ${{ steps.scan.outputs.report_path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Ensure AWS CLI is Installed
+        run: |
+          if ! command -v aws &> /dev/null; then
+            echo "AWS CLI not found. Installing..."
+            curl "https://awscli.amazonaws.com/awscli-exe-linux-x86_64.zip" -o "awscliv2.zip"
+            unzip -q awscliv2.zip
+            if [ "$(id -u)" -eq 0 ]; then
+              ./aws/install
+            else
+              sudo ./aws/install
+            fi
+            rm -rf aws awscliv2.zip
+          fi
+          aws --version
+          if ! command -v jq &> /dev/null; then
+            echo "jq not found. Installing..."
+            if [ "$(id -u)" -eq 0 ]; then
+              apt-get update
+              apt-get install -y jq
+            else
+              sudo apt-get update
+              sudo apt-get install -y jq
+            fi
+          fi
+          jq --version
+
+      - name: Discover ECS images
+        id: discover
+        run: |
+          set -euo pipefail
+
+          echo "Discovering task definition for service: $ECS_SERVICE"
+
+          TASK_DEF_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+
+          echo "Task Definition ARN: $TASK_DEF_ARN"
+
+          TASK_DEF=$(aws ecs describe-task-definition \
+            --task-definition "$TASK_DEF_ARN" \
+            --endpoint-url "$AWS_ENDPOINT_URL" \
+            --query 'taskDefinition' \
+            --output json)
+
+          IMAGE_URI=$(echo "$TASK_DEF" | jq -r '.containerDefinitions[] | select(.name=="obd-ii-replay-engine") | .image')
+
+          if [ "$IMAGE_URI" == "null" ] || [ -z "$IMAGE_URI" ]; then
+            echo "No image found in ECS, using local build from Dockerfile"
+            exit 1
+          fi
+
+          echo "image_uri=$IMAGE_URI" >> $GITHUB_OUTPUT
+          echo "Discovered image: $IMAGE_URI"
+
+          echo "$TASK_DEF" > /tmp/task-def.json
+
+      # - name: Configure Docker for Floci ECR
+      #   run: |
+      #     set -euo pipefail
+      #     ECR_PASSWORD="$(aws ecr get-login-password --region "$AWS_DEFAULT_REGION" --endpoint-url "$AWS_ENDPOINT_URL")"
+      #     DOCKER_CONFIG="$RUNNER_TEMP/floci-docker-config"
+      #     mkdir -p "$DOCKER_CONFIG"
+      #     AUTH="$(printf 'AWS:%s' "$ECR_PASSWORD" | base64 -w 0)"
+      #     printf '{"auths":{"%s":{"auth":"%s"}}}\n' "$ECR_REGISTRY" "$AUTH" > "$DOCKER_CONFIG/config.json"
+      #     echo "DOCKER_CONFIG=$DOCKER_CONFIG" >> $GITHUB_ENV
+      #     echo "Docker configured for $ECR_REGISTRY"
+
+      # - name: Set up Docker Buildx
+      #   uses: docker/setup-buildx-action@v3
+
+      # - name: Build image from Dockerfile for scanning
+      #   run: |
+      #     set -euo pipefail
+      #     docker build -t obd-ii-replay-engine:scan ./obd-ii-replay-engine
+      #     echo "Built local image for scanning"
+
+      - name: Install Trivy
+        run: |
+          sudo apt-get update && sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+          wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | gpg --dearmor | sudo tee /usr/share/keyrings/trivy.gpg > /dev/null
+          echo "deb [signed-by=/usr/share/keyrings/trivy.gpg] https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee /etc/apt/sources.list.d/trivy.list
+          sudo apt-get update && sudo apt-get install -y trivy
+          trivy --version
+
+      - name: Scan image with Trivy
+        id: scan
+        run: |
+          set -euo pipefail
+          REPORT_PATH="./trivy-report.json"
+          SUMMARY_PATH="./trivy-summary.txt"
+
+          trivy image \
+            --pkg-types os,library \
+            --format json \
+            --severity "CRITICAL" \
+            --scanners vuln,config \
+            --output "$REPORT_PATH" \
+            "${{ steps.discover.outputs.image_uri }}" > "$SUMMARY_PATH" 2>&1 || true
+
+          # trivy image \
+          #   --severity "${MIN_SEVERITY},CRITICAL" \
+          #   --no-progress \
+          #   obd-ii-replay-engine:scan > "$SUMMARY_PATH" 2>&1 || true
+
+          echo "report_path=$REPORT_PATH" >> $GITHUB_OUTPUT
+          echo "## Trivy Scan Summary" >> $GITHUB_STEP_SUMMARY
+          cat "$SUMMARY_PATH" >> $GITHUB_STEP_SUMMARY
+
+          CRITICAL_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL")] | length' "$REPORT_PATH")
+          HIGH_COUNT=$(jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="HIGH")] | length' "$REPORT_PATH")
+
+          echo "CRITICAL_COUNT=$CRITICAL_COUNT" >> $GITHUB_ENV
+          echo "HIGH_COUNT=$HIGH_COUNT" >> $GITHUB_ENV
+          echo "Critical vulnerabilities: $CRITICAL_COUNT"
+          echo "High vulnerabilities: $HIGH_COUNT"
+
+      - name: Check if vulnerabilities exist
+        id: check
+        run: |
+          if [ "${CRITICAL_COUNT:-0}" -gt 0 ] || [ "${HIGH_COUNT:-0}" -gt 0 ]; then
+            echo "vulnerabilities_found=true" >> $GITHUB_OUTPUT
+            echo "Vulnerabilities found, will trigger auto-fix"
+          else
+            echo "vulnerabilities_found=false" >> $GITHUB_OUTPUT
+            echo "No high/critical vulnerabilities found"
+          fi
+
+      - name: Setup Claude CLI
+        if: steps.check.outputs.vulnerabilities_found == 'true'
+        run: |
+          npm install -g @anthropic-ai/claude-code || true
+          claude --version || echo "Claude CLI not available, using fallback"
+
+      - name: Create fix branch
+        if: steps.check.outputs.vulnerabilities_found == 'true'
+        id: branch
+        run: |
+          BRANCH_NAME="auto-fix/dockerfile-trivy-$(date +%Y%m%d-%H%M%S)"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$BRANCH_NAME"
+          echo "branch_name=$BRANCH_NAME" >> $GITHUB_OUTPUT
+          echo "Created branch $BRANCH_NAME"
+
+      - name: Run Claude CLI to fix Dockerfile
+        if: steps.check.outputs.vulnerabilities_found == 'true'
+        env:
+          IS_SANDBOX: "1"
+          GIT_PAGER: cat # 1. Disables less pager to prevent git diff from hanging
+          PAGER: cat
+          DOCKERFILE_PATH: obd-ii-replay-engine/Dockerfile
+          REQUIREMENTS_PATH: obd-ii-replay-engine/requirements.txt
+          ANTHROPIC_BASE_URL: 'http://host.docker.internal:8082'
+          ANTHROPIC_API_KEY: 'sk-ant-dummy-fcc-key'
+        run: |
+          set -euo pipefail
+
+          # 2. Extract Trivy CVEs directly into the workspace
+          jq '[.Results[]?.Vulnerabilities[]? | select(.Severity=="CRITICAL" or .Severity=="HIGH") | {PkgName, InstalledVersion, FixedVersion}] | unique' \
+            ./trivy-report.json > ./cves.json
+
+          # 3. Create a strict prompt instructing Claude NOT to output conversational preamble
+          cat > ./claude-prompt.md << 'EOF'
+          You are an automated security remediation agent. Update the following Dockerfile to fix the reported vulnerabilities.
+
+          CRITICAL/HIGH VULNERABILITIES:
+          EOF
+          cat ./cves.json >> ./claude-prompt.md
+
+          cat >> ./claude-prompt.md << 'EOF'
+
+          CURRENT DOCKERFILE:
+          EOF
+          cat "$DOCKERFILE_PATH" >> ./claude-prompt.md
+
+          cat >> ./claude-prompt.md << 'EOF'
+
+          REQUIREMENTS:
+          - Output ONLY the raw updated Dockerfile code.
+          - Do NOT include any conversational preamble, planning thoughts, or markdown fences (```).
+          - The very first line of your response MUST begin with FROM.
+          - Maintain CMD ["python", "replay_engine.py"].
+          EOF
+
+          # Run headless in sandbox mode
+          claude -p "$(cat ./claude-prompt.md)" --dangerously-skip-permissions > ./claude-output.raw
+
+          # Strip any accidental markdown formatting
+          sed -e 's/^```dockerfile//' -e 's/^```//' ./claude-output.raw | sed '/^$/d' > ./updated-dockerfile
+
+          # 4. Safety Guardrail: NEVER overwrite the Dockerfile unless 'FROM' is present
+          if ! grep -q "^FROM " ./updated-dockerfile; then
+            echo "::error::Claude did not return a valid Dockerfile. Output was:"
+            cat ./claude-output.raw
+            exit 1
+          fi
+
+          cp "$DOCKERFILE_PATH" /tmp/dockerfile.bak
+          cat ./updated-dockerfile > "$DOCKERFILE_PATH"
+
+          # 5. Non-blocking diff output
+          echo "Dockerfile successfully updated:"
+          git --no-pager diff "$DOCKERFILE_PATH"
+
+          # Cleanup prompt files
+          rm -f ./cves.json ./claude-prompt.md ./claude-output.raw ./updated-dockerfile
+
+      - name: Commit and push changes
+        if: steps.check.outputs.vulnerabilities_found == 'true'
+        env:
+          GIT_TERMINAL_PROMPT: "0" # Prevents git push from hanging waiting for interactive username/password
+        run: |
+          set -euo pipefail
+          BRANCH_NAME="${{ steps.branch.outputs.branch_name }}"
+          git add obd-ii-replay-engine/Dockerfile obd-ii-replay-engine/requirements.txt
+          git commit -m "security(auto-fix): update Dockerfile and requirements to fix Trivy vulnerabilities"
+          
+          # Only push if running on real GitHub, or skip during local 'act' testing
+          if [ -n "${GITHUB_ACTIONS:-}" ] && [ "${ACT:-}" != "true" ]; then
+            git push origin "$BRANCH_NAME"
+          else
+            echo "Running locally in act: skipped 'git push' to prevent credential hangs."
+          fi
+      - name: Create Pull Request
+        if: steps.check.outputs.vulnerabilities_found == 'true'
+        uses: peter-evans/create-pull-request@v6
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          commit-message: "security(auto-fix): update Dockerfile and requirements to fix Trivy vulnerabilities"
+          title: "🔒 Auto-fix: Remediate Trivy HIGH/CRITICAL vulnerabilities in obd-ii-replay-engine"
+          body: |
+            ## Security Auto-Fix
+
+            Automated vulnerability remediation triggered by Trivy scan.
+
+            ### Vulnerabilities Found
+            - **Critical**: ${CRITICAL_COUNT:-0}
+            - **High**: ${HIGH_COUNT:-0}
+
+            ### Trivy Report
+            See workflow run for full scan details.
+
+            ### Testing
+            - [ ] Build image successfully
+            - [ ] Application starts correctly
+            - [ ] Dependencies install without errors
+
+            🤖 Generated with [Claude Code](https://claude.com/claude-code)
+          branch: ${{ steps.branch.outputs.branch_name }}
+          base: main
+          delete-branch: true
